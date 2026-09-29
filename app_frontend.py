@@ -4,7 +4,8 @@ import requests
 import streamlit as st
 import plotly.graph_objects as go
 
-BACKEND_URL = "http://127.0.0.1:8000/api/v1/assess-risk"
+BACKEND_BASE_URL = "http://127.0.0.1:8000"
+BACKEND_URL = f"{BACKEND_BASE_URL}/api/v1/assess-risk"
 
 st.set_page_config(
     page_title="Fraud & Risk Assessment",
@@ -14,6 +15,7 @@ st.set_page_config(
 
 st.title("🛡️ Multi-Domain Fraud & Risk Assessment")
 st.caption("Local PoC — FastAPI + Streamlit + Regex/Scikit-learn-ready architecture")
+
 st.info(
     "Infrastructure data is mocked locally. No real telecom/PTA system, subscriber "
     "database, or external API is accessed."
@@ -21,23 +23,31 @@ st.info(
 
 with st.sidebar:
     st.header("Assessment Input")
+
     phone_number = st.text_input(
         "Phone Number",
         value="+923001234567",
         placeholder="+923001234567",
     )
+
     message_text = st.text_area(
         "Ad / Message Text",
         value="Urg3nt! Ap ko in'am mila hai. Security fee 5000 paisa jama karain.",
         height=150,
         help="Supports Roman Urdu, scam keywords, and leetspeak such as f33 or urg3nt.",
     )
+
     carrier_type = st.selectbox(
         "Carrier / Line Type",
         ["Mobile", "VOIP", "Fixed Line"],
         index=1,
     )
-    assess = st.button("🔍 Assess Risk", type="primary", use_container_width=True)
+
+    assess = st.button(
+        "🔍 Assess Risk",
+        type="primary",
+        use_container_width=True,
+    )
 
 if assess:
     payload = {
@@ -48,7 +58,11 @@ if assess:
 
     try:
         with st.spinner("Running local fraud/risk assessment..."):
-            response = requests.post(BACKEND_URL, json=payload, timeout=10)
+            response = requests.post(
+                BACKEND_URL,
+                json=payload,
+                timeout=10,
+            )
 
         if response.ok:
             st.session_state["assessment"] = response.json()
@@ -57,7 +71,11 @@ if assess:
                 detail = response.json().get("detail", response.text)
             except ValueError:
                 detail = response.text
-            st.error(f"Backend returned HTTP {response.status_code}: {detail}")
+
+            st.error(
+                f"Backend returned HTTP {response.status_code}: {detail}"
+            )
+
     except requests.RequestException:
         st.error(
             "Could not connect to FastAPI. Start the backend first with: "
@@ -68,6 +86,7 @@ result = st.session_state.get("assessment")
 
 if not result:
     st.subheader("How the PoC scores risk")
+
     st.markdown(
         """
         - **VOIP line:** +25
@@ -77,6 +96,7 @@ if not result:
         - **Maximum unified score:** 100
         """
     )
+
     st.stop()
 
 score = result["risk_score"]
@@ -105,7 +125,12 @@ with left:
             },
         )
     )
-    gauge.update_layout(height=300, margin=dict(l=20, r=20, t=60, b=20))
+
+    gauge.update_layout(
+        height=300,
+        margin=dict(l=20, r=20, t=60, b=20),
+    )
+
     st.plotly_chart(gauge, use_container_width=True)
 
     st.metric("Risk Level", level)
@@ -113,6 +138,7 @@ with left:
 
 with right:
     st.subheader("🚩 High-Risk Flags")
+
     flags = result["flags"]
 
     if flags:
@@ -127,6 +153,7 @@ col1, col2 = st.columns(2)
 
 with col1:
     st.subheader("Factor Contribution")
+
     contributions = result["explainability"]["contributions"]
 
     for item in contributions:
@@ -144,17 +171,29 @@ with col2:
     scam_scan = result["heuristic_analysis"]["scam_pattern_scan"]
     leet_scan = result["heuristic_analysis"]["leetspeak"]
 
-    st.write("**Leetspeak detected:**", "Yes" if leet_scan["detected"] else "No")
-    if leet_scan["matched_tokens"]:
-        st.write("Matched tokens:", ", ".join(leet_scan["matched_tokens"]))
+    st.write(
+        "**Leetspeak detected:**",
+        "Yes" if leet_scan["detected"] else "No",
+    )
 
-    st.write("**Roman Urdu/scam text matched:**", "Yes" if scam_scan["matched"] else "No")
+    if leet_scan["matched_tokens"]:
+        st.write(
+            "Matched tokens:",
+            ", ".join(leet_scan["matched_tokens"]),
+        )
+
+    st.write(
+        "**Roman Urdu/scam text matched:**",
+        "Yes" if scam_scan["matched"] else "No",
+    )
+
     if scam_scan["categories"]:
         st.json(scam_scan["categories"])
 
 st.divider()
 
 st.subheader("Mock Infrastructure Intelligence")
+
 infra_col1, infra_col2 = st.columns(2)
 
 with infra_col1:
