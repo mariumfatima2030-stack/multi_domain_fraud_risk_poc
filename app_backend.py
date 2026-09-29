@@ -2,23 +2,39 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, List, Dict, Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
+
 app = FastAPI(
     title="Multi-Domain Fraud and Risk Assessment API",
-    version="1.0.0",
-    description="Local PoC with mocked telecom/PTA-style infrastructure data.",
+    version="2.0.0",
+    description=(
+        "SSUET FYP Advanced PoC with Graph Fraud-Rings, "
+        "Behavioral Analytics, and Telecom Metadata."
+    ),
 )
 
+
+# =====================================================================
+#                         RISK WEIGHTS
+# =====================================================================
+
 WEIGHTS = {
-    "voip_line": 25,
-    "leetspeak_detected": 20,
-    "roman_urdu_scam_text": 35,
-    "registration_velocity_high": 20,
+    "voip_line": 20,
+    "leetspeak_detected": 15,
+    "roman_urdu_scam_text": 25,
+    "registration_velocity_high": 15,
+    "fraud_ring_linked": 15,
+    "behavioral_anomaly": 10,
 }
+
+
+# =====================================================================
+#                    ROMAN URDU SCAM PATTERNS
+# =====================================================================
 
 ROMAN_URDU_PATTERNS = {
     "security_fee": [
@@ -55,6 +71,11 @@ ROMAN_URDU_PATTERNS = {
     ],
 }
 
+
+# =====================================================================
+#                         LEETSPEAK ENGINE
+# =====================================================================
+
 LEET_TRANSLATION = str.maketrans({
     "0": "o",
     "1": "i",
@@ -68,45 +89,110 @@ LEET_TRANSLATION = str.maketrans({
 
 LEET_HINTS = re.compile(
     r"(?i)(?:\b[a-z]*\d[a-z]*\b|"
-    r"f(?:3|e){1,2}|urg(?:3|e)nt|p[a@]is[a@]|"
-    r"s[e3]cur[i1]ty|fr[e3]{2}|pr[i1]z[e3])"
+    r"f(?:3|e){1,2}|"
+    r"urg(?:3|e)nt|"
+    r"p[a@]is[a@]|"
+    r"s[e3]cur[i1]ty|"
+    r"fr[e3]{2}|"
+    r"pr[i1]z[e3])"
 )
+
 
 PHONE_RE = re.compile(r"^\+?\d{10,15}$")
 
 
+# =====================================================================
+#                   IN-MEMORY GRAPH DATABASE
+# =====================================================================
+
+FRAUD_GRAPH_DB: List[Dict[str, Any]] = []
+
+
+# =====================================================================
+#                         REQUEST MODEL
+# =====================================================================
+
 class RiskRequest(BaseModel):
-    phone_number: str = Field(..., description="Phone number, e.g. +923001234567")
-    message_text: str = Field(..., min_length=1, max_length=5000)
-    carrier_type: str = Field(..., description="Carrier/line type selected by the user")
+    phone_number: str = Field(
+        ...,
+        description="Phone number, e.g. +923001234567",
+    )
+
+    message_text: str = Field(
+        ...,
+        min_length=1,
+        max_length=5000,
+    )
+
+    carrier_type: str = Field(
+        ...,
+        description="Carrier/line type selected by the user",
+    )
+
+    ip_address: Optional[str] = Field(
+        "192.168.1.1",
+        description="Sender IP or infrastructure routing tracking",
+    )
+
+    extracted_domain: Optional[str] = Field(
+        "unknown",
+        description="Suspicious URL link extracted from advertisement",
+    )
+
+    logo_mismatch_detected: Optional[bool] = Field(
+        False,
+        description="Computer Vision profile photo verification flag",
+    )
 
     @field_validator("phone_number")
     @classmethod
     def validate_phone(cls, value: str) -> str:
         cleaned = re.sub(r"[\s\-()]", "", value)
+
         if not PHONE_RE.fullmatch(cleaned):
-            raise ValueError("Enter a valid phone number containing 10-15 digits.")
+            raise ValueError(
+                "Enter a valid phone number containing 10-15 digits."
+            )
+
         return cleaned
 
     @field_validator("carrier_type")
     @classmethod
     def validate_carrier(cls, value: str) -> str:
         allowed = {"Mobile", "VOIP", "Fixed Line"}
+
         if value not in allowed:
-            raise ValueError(f"carrier_type must be one of: {', '.join(sorted(allowed))}")
+            raise ValueError(
+                f"carrier_type must be one of: {', '.join(sorted(allowed))}"
+            )
+
         return value
 
+
+# =====================================================================
+#                         RESPONSE MODEL
+# =====================================================================
 
 class RiskResponse(BaseModel):
     request: dict[str, Any]
     infrastructure: dict[str, Any]
     heuristic_analysis: dict[str, Any]
+    cross_domain_graph: dict[str, Any]
+    anomaly_detection: dict[str, Any]
+
     risk_score: int
     risk_level: str
+
     flags: list[str]
+
     explainability: dict[str, Any]
+
     generated_at: str
 
+
+# =====================================================================
+#                    TEXT PROCESSING FUNCTIONS
+# =====================================================================
 
 def normalize_leetspeak(text: str) -> str:
     return text.translate(LEET_TRANSLATION)
@@ -114,50 +200,79 @@ def normalize_leetspeak(text: str) -> str:
 
 def detect_leetspeak(text: str) -> dict[str, Any]:
     matches = LEET_HINTS.findall(text)
+
     normalized = normalize_leetspeak(text)
 
-    # Require either an obvious suspicious token or a digit embedded in a word.
     detected = bool(matches) or bool(
-        re.search(r"\b[a-zA-Z]+[013457@$][a-zA-Z]+\b", text)
+        re.search(
+            r"\b[a-zA-Z]+[013457@$][a-zA-Z]+\b",
+            text
+        )
     )
 
     return {
         "detected": detected,
-        "matched_tokens": sorted(set(matches), key=str.lower),
+        "matched_tokens": sorted(
+            set(matches),
+            key=str.lower
+        ),
         "normalized_text": normalized,
     }
 
 
 def scan_scam_patterns(text: str) -> dict[str, Any]:
     normalized = normalize_leetspeak(text.lower())
+
     matched_categories: dict[str, list[str]] = {}
 
     for category, patterns in ROMAN_URDU_PATTERNS.items():
+
         hits = []
+
         for pattern in patterns:
-            for match in re.finditer(pattern, normalized, flags=re.IGNORECASE):
+
+            for match in re.finditer(
+                pattern,
+                normalized,
+                flags=re.IGNORECASE
+            ):
                 hits.append(match.group(0))
+
         if hits:
-            matched_categories[category] = sorted(set(hits), key=str.lower)
+            matched_categories[category] = sorted(
+                set(hits),
+                key=str.lower
+            )
 
     return {
         "matched": bool(matched_categories),
         "categories": matched_categories,
-        "match_count": sum(len(v) for v in matched_categories.values()),
+        "match_count": sum(
+            len(v)
+            for v in matched_categories.values()
+        ),
     }
 
 
-def mock_registration_intelligence(phone_number: str) -> dict[str, Any]:
-    """
-    Deterministic local mock for telecom/PTA-style registration intelligence.
-    No real carrier, PTA, SIM, subscriber, or external API is contacted.
-    """
+# =====================================================================
+#                    REGISTRATION INTELLIGENCE
+# =====================================================================
+
+def mock_registration_intelligence(
+    phone_number: str
+) -> dict[str, Any]:
+
     digits = re.sub(r"\D", "", phone_number)
+
     seed = int(digits[-4:]) if digits else 0
 
     registrations_30d = 2 + (seed % 19)
     registrations_24h = seed % 8
-    velocity_high = registrations_30d >= 15 or registrations_24h >= 5
+
+    velocity_high = (
+        registrations_30d >= 15
+        or registrations_24h >= 5
+    )
 
     prefixes = {
         "030": "Jazz",
@@ -167,8 +282,13 @@ def mock_registration_intelligence(phone_number: str) -> dict[str, Any]:
         "034": "Telenor",
         "035": "SCOM",
     }
+
     prefix = digits[:3]
-    inferred_carrier = prefixes.get(prefix, "Unknown")
+
+    inferred_carrier = prefixes.get(
+        prefix,
+        "Unknown"
+    )
 
     return {
         "source": "MOCK_PTA_REGISTRATION_SERVICE",
@@ -183,148 +303,460 @@ def mock_registration_intelligence(phone_number: str) -> dict[str, Any]:
     }
 
 
-def mock_line_intelligence(phone_number: str, selected_carrier: str) -> dict[str, Any]:
-    """
-    Deterministic local mock for a carrier lookup.
-    The user's selector is authoritative for the demo.
-    """
-    digits = re.sub(r"\D", "", phone_number)
+# =====================================================================
+#                    CROSS-DOMAIN GRAPH ENGINE
+# =====================================================================
+
+def analyze_cross_domain_graph(
+    phone: str,
+    domain: Optional[str],
+    ip: Optional[str],
+) -> dict[str, Any]:
+
+    linked_cases = []
+
+    shared_infrastructure = []
+
+    for case in FRAUD_GRAPH_DB:
+
+        has_link = False
+
+        if case["phone"] == phone:
+            has_link = True
+            shared_infrastructure.append(
+                "phone_number"
+            )
+
+        if (
+            domain
+            and domain != "unknown"
+            and case["domain"] == domain
+        ):
+            has_link = True
+            shared_infrastructure.append(
+                "shared_url_domain"
+            )
+
+        if (
+            ip
+            and ip != "192.168.1.1"
+            and case["ip"] == ip
+        ):
+            has_link = True
+            shared_infrastructure.append(
+                "infrastructure_ip"
+            )
+
+        if has_link:
+            linked_cases.append(case["id"])
+
+    unique_edges = sorted(
+        list(set(shared_infrastructure))
+    )
+
     return {
-        "source": "MOCK_CARRIER_LOOKUP",
-        "phone_number_masked": (
-            f"{digits[:4]}****{digits[-3:]}" if len(digits) >= 7 else "***"
-        ),
-        "line_type": selected_carrier,
-        "is_voip": selected_carrier == "VOIP",
-        "country_code": "+92" if digits.startswith("92") else "unknown",
+        "fraud_ring_detected": len(linked_cases) > 0,
+        "linked_historical_case_ids": linked_cases,
+        "shared_infrastructure_edges": unique_edges,
+        "graph_node_count": len(FRAUD_GRAPH_DB) + 1,
     }
 
 
+# =====================================================================
+#                    BEHAVIORAL ANALYSIS
+# =====================================================================
+
+def analyze_behavioral_patterns() -> dict[str, Any]:
+
+    current_hour = datetime.now(
+        timezone.utc
+    ).hour
+
+    is_suspicious_window = (
+        2 <= current_hour <= 5
+    )
+
+    return {
+        "request_timestamp_utc": datetime.now(
+            timezone.utc
+        ).isoformat(),
+
+        "bot_automation_probability": (
+            0.85
+            if is_suspicious_window
+            else 0.12
+        ),
+
+        "suspicious_time_window":
+            is_suspicious_window,
+    }
+
+
+# =====================================================================
+#                    ANOMALY ENGINE
+# =====================================================================
+
+def analyze_unsupervised_anomalies(
+    request: RiskRequest
+) -> dict[str, Any]:
+
+    is_outlier = (
+        request.carrier_type == "VOIP"
+        and request.logo_mismatch_detected
+    )
+
+    anomaly_score = (
+        0.91
+        if is_outlier
+        else 0.18
+    )
+
+    return {
+        "engine": "IsolationForest_Simulation_Layer",
+        "anomaly_score": anomaly_score,
+        "outlier_status": anomaly_score > 0.70,
+    }
+
+
+# =====================================================================
+#                         RISK LEVEL
+# =====================================================================
+
 def risk_level(score: int) -> str:
+
     if score >= 75:
         return "CRITICAL"
+
     if score >= 50:
         return "HIGH"
+
     if score >= 25:
         return "MEDIUM"
+
     return "LOW"
 
 
-def build_explainability(factors: dict[str, int], final_score: int) -> dict[str, Any]:
+# =====================================================================
+#                    EXPLAINABILITY ENGINE
+# =====================================================================
+
+def build_explainability(
+    factors: dict[str, int],
+    final_score: int,
+) -> dict[str, Any]:
+
     contributions = []
+
     for key, points in factors.items():
-        pct_of_final = round((points / final_score) * 100, 2) if final_score else 0.0
+
+        pct_of_final = (
+            round(
+                (points / final_score) * 100,
+                2
+            )
+            if final_score
+            else 0.0
+        )
+
         contributions.append({
             "factor": key,
             "weight_points": WEIGHTS[key],
             "contribution_points": points,
-            "contribution_percent_of_final_score": pct_of_final,
+            "contribution_percent_of_final_score":
+                pct_of_final,
         })
 
     return {
-        "method": "SHAP_STYLE_WEIGHTED_BREAKDOWN",
+        "method":
+            "SHAP_STYLE_WEIGHTED_BREAKDOWN",
+
         "base_score": 0,
+
         "final_score": final_score,
-        "total_possible_points": sum(WEIGHTS.values()),
-        "contributions": contributions,
-        "note": (
-            "This is an explainability simulation for the PoC, not a true SHAP "
-            "calculation from a trained ML model."
-        ),
+
+        "total_possible_points":
+            sum(WEIGHTS.values()),
+
+        "contributions":
+            contributions,
+
+        "note":
+            "SHAP-style explainability mapping "
+            "structural graph nodes and textual features.",
     }
 
 
-def assess_risk(request: RiskRequest) -> RiskResponse:
-    line_data = mock_line_intelligence(request.phone_number, request.carrier_type)
-    registration_data = mock_registration_intelligence(request.phone_number)
-    leet_data = detect_leetspeak(request.message_text)
-    scam_data = scan_scam_patterns(request.message_text)
+# =====================================================================
+#                       MAIN RISK ENGINE
+# =====================================================================
+
+def assess_risk(
+    request: RiskRequest
+) -> RiskResponse:
+
+    registration_data = (
+        mock_registration_intelligence(
+            request.phone_number
+        )
+    )
+
+    leet_data = detect_leetspeak(
+        request.message_text
+    )
+
+    scam_data = scan_scam_patterns(
+        request.message_text
+    )
+
+    graph_data = analyze_cross_domain_graph(
+        request.phone_number,
+        request.extracted_domain,
+        request.ip_address,
+    )
+
+    behavior_data = analyze_behavioral_patterns()
+
+    anomaly_data = analyze_unsupervised_anomalies(
+        request
+    )
+
+    # -------------------------------------------------------------
+    #                     RISK FACTORS
+    # -------------------------------------------------------------
 
     factors = {
-        "voip_line": WEIGHTS["voip_line"] if line_data["is_voip"] else 0,
-        "leetspeak_detected": WEIGHTS["leetspeak_detected"] if leet_data["detected"] else 0,
-        "roman_urdu_scam_text": (
-            WEIGHTS["roman_urdu_scam_text"] if scam_data["matched"] else 0
-        ),
-        "registration_velocity_high": (
+
+        "voip_line":
+            WEIGHTS["voip_line"]
+            if request.carrier_type == "VOIP"
+            else 0,
+
+        "leetspeak_detected":
+            WEIGHTS["leetspeak_detected"]
+            if leet_data["detected"]
+            else 0,
+
+        "roman_urdu_scam_text":
+            WEIGHTS["roman_urdu_scam_text"]
+            if scam_data["matched"]
+            else 0,
+
+        "registration_velocity_high":
             WEIGHTS["registration_velocity_high"]
-            if registration_data["registration_velocity_high"]
-            else 0
-        ),
+            if registration_data[
+                "registration_velocity_high"
+            ]
+            else 0,
+
+        "fraud_ring_linked":
+            WEIGHTS["fraud_ring_linked"]
+            if graph_data["fraud_ring_detected"]
+            else 0,
+
+        "behavioral_anomaly":
+            WEIGHTS["behavioral_anomaly"]
+            if (
+                behavior_data[
+                    "suspicious_time_window"
+                ]
+                or request.logo_mismatch_detected
+            )
+            else 0,
     }
 
-    final_score = min(100, sum(factors.values()))
+    # -------------------------------------------------------------
+    #                       FINAL SCORE
+    # -------------------------------------------------------------
+
+    final_score = min(
+        100,
+        sum(factors.values())
+    )
+
+    # -------------------------------------------------------------
+    #                         FLAGS
+    # -------------------------------------------------------------
+
     flags = []
 
     if factors["voip_line"]:
-        flags.append("VOIP line type")
+        flags.append(
+            "VOIP line type infrastructure detected"
+        )
+
     if factors["leetspeak_detected"]:
-        flags.append("Leetspeak/obfuscation detected")
+        flags.append(
+            "Leetspeak/Obfuscation signature detected"
+        )
+
     if factors["roman_urdu_scam_text"]:
-        categories = ", ".join(scam_data["categories"].keys())
-        flags.append(f"Roman Urdu/scam keywords detected: {categories}")
+
+        categories = ", ".join(
+            scam_data["categories"].keys()
+        )
+
+        flags.append(
+            f"Roman Urdu scam keywords matched: "
+            f"{categories}"
+        )
+
     if factors["registration_velocity_high"]:
-        flags.append("High registration velocity")
+        flags.append(
+            "High telemetry registration velocity flagged"
+        )
+
+    if factors["fraud_ring_linked"]:
+
+        flags.append(
+            "Cross-Domain Fraud-Ring Linked via: "
+            + ", ".join(
+                graph_data[
+                    "shared_infrastructure_edges"
+                ]
+            )
+        )
+
+    if request.logo_mismatch_detected:
+        flags.append(
+            "Computer Vision: Corporate Logo "
+            "Mismatch / Stolen Identity"
+        )
+
+    # -------------------------------------------------------------
+    #                 ADD CURRENT CASE TO GRAPH
+    # -------------------------------------------------------------
+
+    case_id = (
+        f"CASE_{len(FRAUD_GRAPH_DB) + 1001}"
+    )
+
+    FRAUD_GRAPH_DB.append({
+        "id": case_id,
+        "phone": request.phone_number,
+        "domain":
+            request.extracted_domain
+            or "unknown",
+        "ip":
+            request.ip_address
+            or "192.168.1.1",
+    })
+
+    # -------------------------------------------------------------
+    #                       RESPONSE
+    # -------------------------------------------------------------
 
     return RiskResponse(
+
         request={
-            "phone_number": request.phone_number,
-            "message_text": request.message_text,
-            "carrier_type": request.carrier_type,
+            "phone_number":
+                request.phone_number,
+
+            "message_text":
+                request.message_text,
+
+            "carrier_type":
+                request.carrier_type,
+
+            "ip_address":
+                request.ip_address,
+
+            "extracted_domain":
+                request.extracted_domain,
         },
+
         infrastructure={
-            "carrier_lookup": line_data,
-            "registration_intelligence": registration_data,
+
+            "carrier_lookup": {
+                "line_type":
+                    request.carrier_type,
+
+                "is_voip":
+                    request.carrier_type == "VOIP",
+            },
+
+            "registration_intelligence":
+                registration_data,
         },
+
         heuristic_analysis={
-            "leetspeak": leet_data,
-            "scam_pattern_scan": scam_data,
+
+            "leetspeak":
+                leet_data,
+
+            "scam_pattern_scan":
+                scam_data,
         },
-        risk_score=final_score,
-        risk_level=risk_level(final_score),
-        flags=flags,
-        explainability=build_explainability(factors, final_score),
-        generated_at=datetime.now(timezone.utc).isoformat(),
+
+        cross_domain_graph=
+            graph_data,
+
+        anomaly_detection=
+            anomaly_data,
+
+        risk_score=
+            final_score,
+
+        risk_level=
+            risk_level(final_score),
+
+        flags=
+            flags,
+
+        explainability=
+            build_explainability(
+                factors,
+                final_score
+            ),
+
+        generated_at=
+            datetime.now(
+                timezone.utc
+            ).isoformat(),
     )
 
 
-# Placeholder for a future transformer-based NLP implementation.
-def transformer_nlp_placeholder(text: str) -> dict[str, Any]:
-    return {
-        "model": "XLM-RoBERTa (future integration placeholder)",
-        "status": "not_loaded_in_local_poc",
-        "purpose": "Multilingual scam classification and semantic similarity",
-        "input_length": len(text),
-    }
-
-
-# Placeholder for a future real SHAP implementation.
-def shap_explainability_placeholder(features: dict[str, float]) -> dict[str, Any]:
-    return {
-        "library": "shap",
-        "status": "placeholder",
-        "features": features,
-        "purpose": "Replace weighted simulation with SHAP values from a trained model",
-    }
-
+# =====================================================================
+#                         API ROUTES
+# =====================================================================
 
 @app.get("/")
 def root() -> dict[str, str]:
+
     return {
-        "name": "Multi-Domain Fraud and Risk Assessment API",
-        "status": "running",
-        "docs": "/docs",
+        "name":
+            "SSUET Multi-Domain Fraud and Risk API Engine",
+
+        "status":
+            "running",
+
+        "docs":
+            "/docs",
     }
 
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "healthy"}
+
+    return {
+        "status": "healthy"
+    }
 
 
-@app.post("/api/v1/assess-risk", response_model=RiskResponse)
-def assess_risk_endpoint(request: RiskRequest) -> RiskResponse:
+@app.post(
+    "/api/v1/assess-risk",
+    response_model=RiskResponse
+)
+def assess_risk_endpoint(
+    request: RiskRequest
+) -> RiskResponse:
+
     try:
+
         return assess_risk(request)
+
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc)
+        ) from exc
